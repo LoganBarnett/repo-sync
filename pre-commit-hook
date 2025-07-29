@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+for file in $(git diff --cached --name-only --diff-filter=ACM \
+                | grep "\.rs$" || true); do
+  rustfmt "$file"
+  git add "$file"
+done

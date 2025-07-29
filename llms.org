@@ -63,7 +63,11 @@ fn open_or_clone_repo(
 #+end_src
 
 
-** Code Structure
+** Code Structure and Flow
+*** File locations
+
+Keep ~.rs~ files (Rust code) under ~src~ if this project builds an executable,
+and ~lib~ if it is a library.
 
 *** Functional Style
 
@@ -79,3 +83,56 @@ those local variables into functions that are memoized.
 
 Use the tap crate to do things like log a value in between a call chain, thus
 avoiding useless local variables.
+
+
+*** Error handling
+
+Use ~thiserror~ in conjunction with the application's error type.  The error
+type is generally named ~AppError~.
+
+You should always favor coercing an error instead of doing an unwrap.  You can
+hang a ~map_err~ call that does the needful.
+
+Create new entries in ~AppError~ for the errors you handle, and stick to
+semantic error entries instead of operational errors.
+
+A bad example.  This is bad because it simply signals a file somewhere in the
+program couldn't be read.  This could conceivably be any file, and thus tells
+both contributors and users nothing.
+
+#+begin_src rustic :results none :exports code
+use std::fs;
+use thiserror::Error;
+
+enum AppError {
+  #[error("Could not read file: {0}")]
+  FileReadError(#[from] std::io::Error),
+}
+
+fn config_file_contents() -> Result<String, AppError> {
+  fs::read_to_string(file_path)
+    .map_err(AppError::FileReadError)
+}
+#+end_src
+
+The following is a good example, where the error indicates the nature of the
+error (the file could not be read) and the context of the error (we can't read
+the config file).
+
+#+begin_src rustic :results none :exports code
+use std::fs;
+use thiserror::Error;
+
+enum AppError {
+  #[error("Could not read configuration file: {0}")]
+  ConfigFileReadError(#[from] std::io::Error),
+}
+
+fn config_file_contents() -> Result<String, AppError> {
+  fs::read_to_string(file_path)
+    .map_err(AppError::ConfigFileReadError)
+}
+#+end_src
+
+Generally this means there will be little reuse of errors and that is deemed
+acceptable.

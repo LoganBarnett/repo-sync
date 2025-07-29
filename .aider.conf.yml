@@ -3,6 +3,8 @@
 attribute-co-authored-by: false
 attribute-commit-message-author: false
 attribute-commit-message-committer: false
+attribute-author: false
+attribute-committer: false
 # This prevents Aider from prompting to add itself to the .gitignore file.  If
 # you're using Aider, you should add Aider's settings to your global gitignore
 # file instead of polluting every repository you touch, just like you should do
