@@ -1,0 +1,81 @@
+#+title:     LLMs
+#+author:    Logan Barnett
+#+email:     logustus@gmail.com
+#+date:      <2025-07-28 Mon>
+#+language:  en
+#+file_tags:
+#+tags:
+
+This is sort of a contributing guide for LLM agents.
+
+* Coding Style
+
+** Formatting
+
+*** Stick to an 80 column layout
+
+Break long lines, generally by splitting repetitious items like list items or
+argument lists.
+
+Here is an example of a long line:
+
+#+begin_src rustic :results none :exports code
+fn open_or_clone_repo(git_url: &str, sync_dir: &PathBuf) -> Result<Repository, SyncError> {
+  // ...
+}
+#+end_src
+
+Breaking the argument list up makes it fit nicely.
+
+#+begin_src rustic :results none :exports code
+fn open_or_clone_repo(
+  git_url: &str,
+  sync_dir: &PathBuf,
+) -> Result<Repository, SyncError> {
+  // ...
+}
+#+end_src
+
+*** For multi-line items, prefer a trailing comma
+
+Argument lists, list items, and more can have trailing commas.
+
+Bad example:
+
+#+begin_src rustic :results none :exports code
+fn open_or_clone_repo(
+  git_url: &str,
+  sync_dir: &PathBuf
+) -> Result<Repository, SyncError> {
+  // ...
+}
+#+end_src
+
+Good example:
+
+#+begin_src rustic :results none :exports code
+fn open_or_clone_repo(
+  git_url: &str,
+  sync_dir: &PathBuf,
+) -> Result<Repository, SyncError> {
+  // ...
+}
+#+end_src
+
+
+** Code Structure
+
+*** Functional Style
+
+Where possible, try to use a functional style.  This means immutable as much as
+possible, and prefer both function chaining and composition.
+
+*** Avoid scope hosting with memoized functions
+
+Instead of placing local variables as high up as possible, favor refactoring
+those local variables into functions that are memoized.
+
+*** Use tap to help avoid useless local variables
+
+Use the tap crate to do things like log a value in between a call chain, thus
+avoiding useless local variables.

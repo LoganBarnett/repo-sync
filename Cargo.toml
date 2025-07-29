@@ -1,0 +1,15 @@
+[package]
+name = "repo-sync"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.5.41", features = ["derive", "env"] }
+clap-verbosity-flag = "3.0.3"
+git2 = "0.20.2"
+ssh-agent = { version = "0.2.4", features = ["agent"] }
+stderrlog = "0.6.0"
+tap = "1.0.1"
+thiserror = "2.0.12"

@@ -1,0 +1,13 @@
+#+title:     Repo Sync
+#+author:    Logan Barnett
+#+email:     logustus@gmail.com
+#+date:      <2025-07-28 Mon>
+#+language:  en
+#+file_tags:
+#+tags:
+
+Synchronize a VCS repository automatically.
+
+You might think "A Bash script could handle this", and you'd kind of be right.
+But this is a sophisticated enough process that Bash rapidly becomes unwieldy,
+and one has to actively work to not get silent errors.
