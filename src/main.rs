@@ -8,9 +8,12 @@ use git2::{
   Cred, FetchOptions, FileFavor, IndexAddOption, MergeOptions, RemoteCallbacks,
   Repository,
 };
+use log::*;
+use ssh_agent_client_rs::Client;
+use ssh_key::PublicKey;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn setup_git_callbacks() -> RemoteCallbacks<'static> {
   let mut callbacks = RemoteCallbacks::new();
@@ -46,8 +49,21 @@ fn open_or_clone_repo(
   }
 }
 
+fn add_key_to_agent(key_path: &Path) -> Result<Client, AppError> {
+  let sock_path = env::var("SSH_AUTH_SOCK")?;
+  let mut client = Client::connect(Path::new(&sock_path))?;
+  let identities = client.list_all_identities()?;
+  for identity in identities {
+    info!("Found agent identity: {:?}", &identity);
+  }
+  Ok(client)
+}
+
 fn main() -> Result<(), AppError> {
   let args = CliArgs::parse();
+
+  // Stored so it remains alive for the program, I think.
+  let _ssh_agent = args.ssh_identity.as_deref().map(add_key_to_agent);
 
   fs::create_dir_all(&args.sync_dir)?;
   let repo = open_or_clone_repo(&args.git_url, &args.sync_dir)?;
@@ -114,7 +130,7 @@ fn main() -> Result<(), AppError> {
 
       // Commit the operation
       let tree_oid = repo.index()?.write_tree()?;
-      let tree = repo.find_tree(tree_oid)?;
+      let _tree = repo.find_tree(tree_oid)?;
       rebase.commit(Some(&sig), &sig, None)?;
       repo.checkout_index(
         Some(&mut repo.index()?),

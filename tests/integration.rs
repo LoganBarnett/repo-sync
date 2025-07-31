@@ -72,7 +72,7 @@ fn host_repository(
       &commit.message,
       &tree,
       &[], // parents,
-    );
+    )?;
   }
   Ok(())
 }
