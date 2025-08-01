@@ -17,9 +17,10 @@
           extensions = [
             # For rust-analyzer and others.  See
             # https://nixos.wiki/wiki/Rust#Shell.nix_example for some details.
-            "rust-src"
+            "clippy"
             "rust-analyzer"
-            "rustfmt-preview"
+            "rust-src"
+            "rustfmt"
           ];
         };
       })

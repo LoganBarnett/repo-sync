@@ -91,7 +91,7 @@ fn version_works() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn clones_missing_repository() -> Result<(), Box<dyn std::error::Error>> {
+fn clones_missing_repository_fs() -> Result<(), Box<dyn std::error::Error>> {
   let host_tmp = TempDir::new()?;
   let commits = vec![TestCommit {
     user: "taco".into(),
@@ -107,6 +107,39 @@ fn clones_missing_repository() -> Result<(), Box<dyn std::error::Error>> {
     .arg(host_tmp.path())
     .arg("--sync-dir")
     .arg(sync_tmp.path())
+    .assert()
+    .success();
+  // Ensure the directory is cloned.
+  // Ensure the expected change is present.
+  assert!(sync_tmp.path().join(".git").exists());
+  Ok(())
+}
+
+#[test]
+fn clones_missing_repository_over_ssh() -> Result<(), Box<dyn std::error::Error>>
+{
+  let host_tmp = TempDir::new()?;
+  let commits = vec![TestCommit {
+    user: "taco".into(),
+    change_type: ChangeType::CreateFile,
+    message: "birth the universe".into(),
+  }];
+  host_repository(host_tmp.path(), &commits)?;
+  let sync_tmp = TempDir::new()?;
+  let mut cmd = Command::cargo_bin("repo-sync")?;
+  cmd
+    .current_dir(&sync_tmp.path())
+    .arg("--git-url")
+    .arg(host_tmp.path())
+    .arg("--sync-dir")
+    .arg(sync_tmp.path())
+    .arg("--ssh-identity")
+    // A steep and unsafe assumption.  Perhaps we can create an account and add
+    // their key in the repo?  Or declare an environment variable which defaults
+    // to this.
+    // This is likely not Windows friendly too, but I'll let a Windows user
+    // figure that out.
+    .arg(format!("{}/.ssh/id_rsa", std::env::var("HOME").unwrap()))
     .assert()
     .success();
   // Ensure the directory is cloned.

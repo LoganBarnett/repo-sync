@@ -1,5 +1,7 @@
 mod cli;
 mod error;
+mod logger;
+mod ssh;
 
 use crate::{cli::CliArgs, error::AppError};
 use clap::Parser;
@@ -9,19 +11,36 @@ use git2::{
   Repository,
 };
 use log::*;
-use ssh_agent_client_rs::Client;
-use ssh_key::PublicKey;
-use std::env;
+use logger::init_logger;
+use ssh::{add_key_to_agent, start_agent};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::{env, path::Path};
 
-fn setup_git_callbacks() -> RemoteCallbacks<'static> {
+fn setup_git_callbacks(
+  key_path_maybe: Option<&Path>,
+) -> RemoteCallbacks<'static> {
   let mut callbacks = RemoteCallbacks::new();
-
-  callbacks.credentials(|_url, username_from_url, _allowed_types| {
-    Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-  });
-
+  if let Some(key_path) = key_path_maybe {
+    // This is the Path equivalent of .clone().
+    let key_path_copy = key_path.to_path_buf();
+    callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+      let username_rust_made_me = whoami::username();
+      let username = username_from_url.unwrap_or(&username_rust_made_me);
+      // Alas, this would be great if it weren't for our sparse options for
+      // dealing with SSH agents.  The most "complete" solution is
+      // ssh-agent-client-rs, but that crate systemically uses `unwrap` instead of
+      // proper Rust error handling.  This makes debugging and clean error
+      // propagation impossible.
+      // Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+      Cred::ssh_key(
+        username,
+        None, // Let git2 find the public key automatically.
+        &key_path_copy,
+        None, // passphrase.
+      )
+    });
+  }
   // TODO: GitHub's keys are both documented and finite, so this shouldn't be
   // needed.  I'll have to add them to my local configuration, and document how
   // that was done.
@@ -29,11 +48,11 @@ fn setup_git_callbacks() -> RemoteCallbacks<'static> {
   //   // Trust all certificates (like StrictHostKeyChecking=no)
   //   true
   // });
-
   callbacks
 }
 
 fn open_or_clone_repo(
+  ssh_identity: Option<&Path>,
   git_url: &str,
   sync_dir: &PathBuf,
 ) -> Result<Repository, AppError> {
@@ -41,7 +60,7 @@ fn open_or_clone_repo(
     Ok(Repository::open(sync_dir)?)
   } else {
     let mut fetch_opts = FetchOptions::new();
-    fetch_opts.remote_callbacks(setup_git_callbacks());
+    fetch_opts.remote_callbacks(setup_git_callbacks(ssh_identity));
 
     let mut builder = RepoBuilder::new();
     builder.fetch_options(fetch_opts);
@@ -49,27 +68,23 @@ fn open_or_clone_repo(
   }
 }
 
-fn add_key_to_agent(key_path: &Path) -> Result<Client, AppError> {
-  let sock_path = env::var("SSH_AUTH_SOCK")?;
-  let mut client = Client::connect(Path::new(&sock_path))?;
-  let identities = client.list_all_identities()?;
-  for identity in identities {
-    info!("Found agent identity: {:?}", &identity);
-  }
-  Ok(client)
-}
-
 fn main() -> Result<(), AppError> {
   let args = CliArgs::parse();
-
-  // Stored so it remains alive for the program, I think.
-  let _ssh_agent = args.ssh_identity.as_deref().map(add_key_to_agent);
+  init_logger();
+  info!(
+    "Syncing {} to {}...",
+    &args.git_url,
+    args.sync_dir.display()
+  );
 
   fs::create_dir_all(&args.sync_dir)?;
-  let repo = open_or_clone_repo(&args.git_url, &args.sync_dir)?;
+  let repo = open_or_clone_repo(
+    args.ssh_identity.as_deref(),
+    &args.git_url,
+    &args.sync_dir,
+  )?;
   env::set_current_dir(&args.sync_dir)?;
 
-  // Check for uncommitted changes.
   let statuses = repo.statuses(None)?;
   if !statuses.is_empty() {
     let user = env::var("USER").unwrap_or("unknown".to_string());
@@ -102,7 +117,10 @@ fn main() -> Result<(), AppError> {
     let mut remote = repo.find_remote("origin")?;
     remote.fetch(
       &["refs/heads/*:refs/remotes/origin/*"],
-      Some(&mut FetchOptions::new().remote_callbacks(setup_git_callbacks())),
+      Some(
+        &mut FetchOptions::new()
+          .remote_callbacks(setup_git_callbacks(args.ssh_identity.as_deref())),
+      ),
       None,
     )?;
 
@@ -139,73 +157,7 @@ fn main() -> Result<(), AppError> {
     }
 
     rebase.finish(None)?;
-    println!("Rebased HEAD onto upstream with theirs auto-resolution");
-
-    // Merge commit approach.  On hold.
-    // let origin_head = repo.find_reference("FETCH_HEAD")?;
-    // let origin_commit = repo.reference_to_annotated_commit(&origin_head)?;
-    // let (analysis, _) = repo.merge_analysis(&[&origin_commit])?;
-
-    // if analysis.is_up_to_date() {
-    //   println!("Already up-to-date");
-    //   return Ok(());
-    // }
-
-    // let local_branch = repo.find_branch("main", git2::BranchType::Local)?;
-    // let local_commit = local_branch.get().peel_to_commit()?;
-
-    // if analysis.is_fast_forward() {
-    //   let refname = head.name().expect("HEAD should have a name");
-    //   let mut reference = repo.find_reference(refname)?;
-    //   reference.set_target(origin_commit.id(), "Fast-forward")?;
-    //   repo.set_head(refname)?;
-    //   repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
-    //   println!("Fast-forwarded {}", refname);
-    //   return Ok(());
-    // } else if analysis.is_normal() {
-    //   // Merge with "theirs" preference
-    //   let mut merge_opts = MergeOptions::new();
-    //   merge_opts.file_favor(FileFavor::Theirs);
-
-    //   repo.merge(&[&origin_commit], Some(&mut merge_opts), None)?;
-
-    //   let mut index = repo.index()?;
-    //   if index.has_conflicts() {
-    //     // Auto-abort to avoid leaving dirty state
-    //     repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
-    //     repo.cleanup_state()?;
-    //     return Err(git2::Error::from_str(
-    //       "Merge resulted in unresolvable conflicts, aborted",
-    //     ));
-    //   }
-    //   // Write merge commit
-    //   let sig = repo.signature()?;
-    //   let tree_oid = index.write_tree()?;
-    //   let tree = repo.find_tree(tree_oid)?;
-    //   let other_commit = repo.find_commit(origin_commit.id())?;
-
-    //   let merge_commit = repo.commit(
-    //     Some("HEAD"),
-    //     &sig,
-    //     &sig,
-    //     "Merged origin (favoring theirs)",
-    //     &tree,
-    //     &[&head_commit, &other_commit],
-    //   )?;
-
-    // }
-
-    // repo
-    //   .head()?
-    //   .name()
-    //   .ok_or_else(|| git2::Error::from_str("Invalid HEAD ref"))?
-    //   .to_string();
-    // repo.merge(
-    //   // TODO: Figure out the main branch.
-    //   [ AnnotatedCommit::refname("origin/master") ],
-    //   Some(MergeOptions.file_favor(FileFavor::Theirs)),
-    // )?;
-    // repo.cleanup_state()?;
+    info!("Rebased HEAD onto upstream with theirs auto-resolution");
 
     repo
       .find_remote("origin")?
