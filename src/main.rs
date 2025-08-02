@@ -1,55 +1,24 @@
 mod cli;
 mod error;
+mod git;
 mod logger;
-mod ssh;
 
 use crate::{cli::CliArgs, error::AppError};
 use clap::Parser;
+use git::{
+  commit_all, fetch_options, git_callbacks, is_local_behind_remote,
+  main_branch, push_options,
+};
 use git2::{
   build::{CheckoutBuilder, RepoBuilder},
-  Cred, FetchOptions, FileFavor, IndexAddOption, MergeOptions, RemoteCallbacks,
-  Repository,
+  Direction, FileFavor, IndexAddOption, MergeOptions, PushOptions, Repository,
 };
 use log::*;
 use logger::init_logger;
-use ssh::{add_key_to_agent, start_agent};
 use std::fs;
 use std::path::PathBuf;
 use std::{env, path::Path};
-
-fn setup_git_callbacks(
-  key_path_maybe: Option<&Path>,
-) -> RemoteCallbacks<'static> {
-  let mut callbacks = RemoteCallbacks::new();
-  if let Some(key_path) = key_path_maybe {
-    // This is the Path equivalent of .clone().
-    let key_path_copy = key_path.to_path_buf();
-    callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-      let username_rust_made_me = whoami::username();
-      let username = username_from_url.unwrap_or(&username_rust_made_me);
-      // Alas, this would be great if it weren't for our sparse options for
-      // dealing with SSH agents.  The most "complete" solution is
-      // ssh-agent-client-rs, but that crate systemically uses `unwrap` instead of
-      // proper Rust error handling.  This makes debugging and clean error
-      // propagation impossible.
-      // Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-      Cred::ssh_key(
-        username,
-        None, // Let git2 find the public key automatically.
-        &key_path_copy,
-        None, // passphrase.
-      )
-    });
-  }
-  // TODO: GitHub's keys are both documented and finite, so this shouldn't be
-  // needed.  I'll have to add them to my local configuration, and document how
-  // that was done.
-  // callbacks.certificate_check(|_cert, _valid| {
-  //   // Trust all certificates (like StrictHostKeyChecking=no)
-  //   true
-  // });
-  callbacks
-}
+use tap::Tap;
 
 fn open_or_clone_repo(
   ssh_identity: Option<&Path>,
@@ -57,17 +26,21 @@ fn open_or_clone_repo(
   sync_dir: &PathBuf,
 ) -> Result<Repository, AppError> {
   if sync_dir.join(".git").exists() {
+    info!("{} is a git repo.", sync_dir.display());
     Ok(Repository::open(sync_dir)?)
   } else {
-    let mut fetch_opts = FetchOptions::new();
-    fetch_opts.remote_callbacks(setup_git_callbacks(ssh_identity));
-
+    info!(
+      "{} is not a git repo.  Cloning there now...",
+      sync_dir.display()
+    );
     let mut builder = RepoBuilder::new();
-    builder.fetch_options(fetch_opts);
+    builder.fetch_options(fetch_options(ssh_identity));
     builder.clone(git_url, sync_dir).map_err(AppError::from)
   }
 }
 
+// Partially vibe coded.  Forgive me.  I have refactored some of it, but still a
+// monolith that needs smaller functions broken out.
 fn main() -> Result<(), AppError> {
   let args = CliArgs::parse();
   init_logger();
@@ -76,7 +49,6 @@ fn main() -> Result<(), AppError> {
     &args.git_url,
     args.sync_dir.display()
   );
-
   fs::create_dir_all(&args.sync_dir)?;
   let repo = open_or_clone_repo(
     args.ssh_identity.as_deref(),
@@ -84,60 +56,81 @@ fn main() -> Result<(), AppError> {
     &args.sync_dir,
   )?;
   env::set_current_dir(&args.sync_dir)?;
-
+  let mut remote = if let Ok(r) = repo.find_remote("origin") {
+    r
+  } else {
+    repo.remote("origin", &args.git_url)?
+  };
+  info!("Connecting?");
+  remote.connect_auth(
+    Direction::Fetch,
+    Some(git_callbacks(args.ssh_identity.as_deref())),
+    None,
+  )?;
+  info!("Connected?");
+  // This doesn't actually track the remote branch's default branch.  This just
+  // asks the git configuration (system?) what the default branch is.  If the
+  // repository's default branch differs from the system configuration default
+  // branch, you will have a mismatch.
+  // let default_branch = remote.default_branch()?;
+  // let branch_name = default_branch.as_str().unwrap();
+  let head_ref = repo.head()?;
+  let branch_name = main_branch(&repo)?;
+  info!("Main branch is: {}", branch_name);
+  // Ensure we are on a local branch, not detached at origin/<branch>.
+  if !repo.head()?.is_branch() {
+    info!("Need to get on a local branch.");
+    let branch_ref = format!("refs/remotes/origin/{}", branch_name);
+    let target = repo.find_reference(&branch_ref)?.peel_to_commit()?;
+    // create local branch if it doesn’t exist yet.
+    if repo
+      .find_branch(&branch_name, git2::BranchType::Local)
+      .is_err()
+    {
+      repo.branch(&branch_name, &target, true)?;
+    }
+    repo.set_head(&format!("refs/heads/{}", branch_name))?;
+    repo.checkout_head(Some(
+      git2::build::CheckoutBuilder::new()
+        .allow_conflicts(true)
+        .force(),
+    ))?;
+    info!("Forcibly moved to local branch.");
+  }
   let statuses = repo.statuses(None)?;
   if !statuses.is_empty() {
-    let user = env::var("USER").unwrap_or("unknown".to_string());
-    let host = env::var("HOSTNAME").unwrap_or("localhost".to_string());
-    let time =
-      chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-
-    let mut config = repo.config()?;
-    config.set_str("user.email", &format!("{}@{}", user, host))?;
-    config.set_str("user.name", &user)?;
-
-    let mut index = repo.index()?;
-    index.add_all(["."], git2::IndexAddOption::DEFAULT, None)?;
-    index.write()?;
-
-    let tree_id = index.write_tree()?;
-    let tree = repo.find_tree(tree_id)?;
-    let head_ref = repo.head()?;
-    let head = repo.head()?.peel_to_commit()?;
-
-    repo.commit(
-      Some("HEAD"),
-      &repo.signature()?,
-      &repo.signature()?,
-      &format!("Update from WebDAV changes on {}", time),
-      &tree,
-      &[&head],
-    )?;
-
-    let mut remote = repo.find_remote("origin")?;
-    remote.fetch(
-      &["refs/heads/*:refs/remotes/origin/*"],
-      Some(
-        &mut FetchOptions::new()
-          .remote_callbacks(setup_git_callbacks(args.ssh_identity.as_deref())),
-      ),
-      None,
-    )?;
-
-    let head_annotated = repo.reference_to_annotated_commit(&head_ref)?;
-    // Determine upstream (remote's HEAD)
-    let fetch_head = repo.find_reference("FETCH_HEAD")?;
-    let upstream = repo.reference_to_annotated_commit(&fetch_head)?;
-
+    info!("Local changes detected.  Committing...");
+    // Refresh HEAD to avoid stale parent OID.
+    commit_all(&repo)?;
+  } else {
+    info!("No local changes detected.");
+  }
+  info!("Fetching new changes from remote...");
+  remote.fetch(
+    &[format!(
+      "+refs/heads/{}:refs/remotes/origin/{}",
+      &branch_name, &branch_name,
+    )],
+    Some(&mut fetch_options(args.ssh_identity.as_deref())),
+    None,
+  )?;
+  info!("Fetch complete.");
+  let head_annotated = repo.reference_to_annotated_commit(&head_ref)?;
+  // Determine upstream (remote's HEAD).
+  let long_branch = format!("refs/remotes/origin/{}", &branch_name);
+  let upstream = repo.reference_to_annotated_commit(
+    &repo.find_reference(long_branch.as_str())?,
+  )?;
+  if is_local_behind_remote(&repo)? {
+    info!("Local is behind remote.  Rebasing...");
     let mut rebase =
       repo.rebase(Some(&head_annotated), Some(&upstream), None, None)?;
     while let Some(_op) = rebase.next() {
       let sig = repo.signature()?;
-      // Try to auto-resolve conflicts favoring theirs
+      // Try to auto-resolve conflicts favoring theirs.
       if repo.index()?.has_conflicts() {
         let mut merge_opts = MergeOptions::new();
         merge_opts.file_favor(FileFavor::Theirs);
-
         let mut index = repo.index()?;
         // Add all with "theirs" resolution
         index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
@@ -145,8 +138,7 @@ fn main() -> Result<(), AppError> {
           panic!("Conflict detected during rebase — aborting! Repo left in dirty state for debugging.");
         }
       }
-
-      // Commit the operation
+      // Commit the operation.
       let tree_oid = repo.index()?.write_tree()?;
       let _tree = repo.find_tree(tree_oid)?;
       rebase.commit(Some(&sig), &sig, None)?;
@@ -155,14 +147,17 @@ fn main() -> Result<(), AppError> {
         Some(&mut CheckoutBuilder::new()),
       )?;
     }
-
     rebase.finish(None)?;
-    info!("Rebased HEAD onto upstream with theirs auto-resolution");
-
-    repo
-      .find_remote("origin")?
-      .push(&["refs/heads/*:refs/heads/*"], None)?;
+    info!("Rebased HEAD onto upstream with --theirs auto-resolution.");
   }
-
+  info!("Pushing changes to remote...");
+  remote.push(
+    &[format!(
+      "+refs/heads/{}:refs/remotes/origin/{}",
+      &branch_name, &branch_name,
+    )],
+    Some(&mut push_options(args.ssh_identity.as_deref())),
+  )?;
+  info!("Success!");
   Ok(())
 }

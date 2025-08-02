@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum AppError {
   #[error("Failed to use libgit2: {0}")]
   Git(#[from] git2::Error),
+  #[error("Git default branch is missing.")]
+  GitBranchMissingError,
   // #[error("I/O error: {0}")]
   // Io(#[from] std::io::Error),
   #[error("Error reading private key: {0}")]
