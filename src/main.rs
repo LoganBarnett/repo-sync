@@ -152,10 +152,7 @@ fn main() -> Result<(), AppError> {
   }
   info!("Pushing changes to remote...");
   remote.push(
-    &[format!(
-      "+refs/heads/{}:refs/remotes/origin/{}",
-      &branch_name, &branch_name,
-    )],
+    &[format!("+refs/heads/{0}:refs/heads/{}", &branch_name,)],
     Some(&mut push_options(args.ssh_identity.as_deref())),
   )?;
   info!("Success!");
